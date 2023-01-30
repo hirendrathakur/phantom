@@ -20,6 +20,7 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 
 import org.slf4j.Logger;
@@ -111,6 +112,16 @@ public class TaskContextImpl implements TaskContext {
     @Override
     public <S> Future<TaskResult> executeAsyncCommand(String commandName, S data, Map<String, Object> params) throws UnsupportedOperationException {
         return this.executorRepository.executeAsyncCommand(commandName, this.createRequestFromParams(commandName, data, params));
+    }
+
+    @Override
+    public <S> CompletableFuture<TaskResult> executeAsyncCommandV2(String commandName, S data, Map<String, Object> params, Decoder decoder) throws UnsupportedOperationException {
+        return this.executorRepository.executeAsyncCommandV2(commandName, this.createRequestFromParams(commandName, data, params),decoder);
+    }
+
+    @Override
+    public <S> CompletableFuture<TaskResult> executeAsyncCommandV2(String commandName, S data, Map<String, Object> params) throws UnsupportedOperationException {
+        return this.executorRepository.executeAsyncCommandV2(commandName, this.createRequestFromParams(commandName, data, params));
     }
     
     /** Creates a TaskRequestWrapper from passed in params and sets the current server span on it*/

@@ -13,6 +13,7 @@
     <artifactId>task</artifactId>
     <name>Task</name>
     <description>Task Framework</description>
+    <version>3.8.1-SNAPSHOT</version>
 
     <licenses>
         <license>

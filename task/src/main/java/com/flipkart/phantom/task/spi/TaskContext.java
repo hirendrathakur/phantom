@@ -21,6 +21,7 @@ import com.flipkart.phantom.task.spi.TaskRequestWrapper;
 import com.flipkart.phantom.task.spi.TaskResult;
 
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 
 /**
@@ -97,6 +98,10 @@ public interface TaskContext {
      * @see TaskContext#executeCommand(String, java.lang.Object, java.util.Map)
      */
     public <S> Future<TaskResult> executeAsyncCommand(String commandName, S data, Map<String, Object> params) throws UnsupportedOperationException;
+
+    public <S> CompletableFuture<TaskResult> executeAsyncCommandV2(String commandName, S data, Map<String, Object> params, Decoder decoder) throws UnsupportedOperationException;
+
+    public <S> CompletableFuture<TaskResult> executeAsyncCommandV2(String commandName, S data, Map<String, Object> params) throws UnsupportedOperationException;
 
     /** Gets the ObjectMapper instance for result serialization to JSON*/
     public ObjectMapper getObjectMapper();

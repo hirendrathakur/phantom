@@ -16,78 +16,87 @@
 
 package com.flipkart.phantom.task.impl;
 
-import java.util.Map;
-import java.util.concurrent.Future;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import com.flipkart.phantom.event.ServiceProxyEvent;
 import com.flipkart.phantom.event.ServiceProxyEventProducer;
 import com.flipkart.phantom.task.impl.interceptor.ClientRequestInterceptor;
 import com.flipkart.phantom.task.impl.interceptor.CommandClientResponseInterceptor;
 import com.flipkart.phantom.task.impl.registry.TaskHandlerRegistry;
 import com.flipkart.phantom.task.impl.repository.AbstractExecutorRepository;
-import com.flipkart.phantom.task.spi.Decoder;
-import com.flipkart.phantom.task.spi.Executor;
-import com.flipkart.phantom.task.spi.RequestWrapper;
-import com.flipkart.phantom.task.spi.TaskRequestWrapper;
-import com.flipkart.phantom.task.spi.TaskResult;
+import com.flipkart.phantom.task.spi.*;
 import com.netflix.hystrix.HystrixCommandProperties.ExecutionIsolationStrategy;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Future;
 
 /**
  * <code>TaskHandlerExecutorRepository</code> is a repository that searches for a {@link TaskHandler}
- * in the {@link TaskHandlerRegistry} based on a command name and then wraps the {@link TaskHandler} into 
+ * in the {@link TaskHandlerRegistry} based on a command name and then wraps the {@link TaskHandler} into
  * a {@link TaskHandlerExecutor} and returns it.
  *
  * @author devashishshankar
  * @version 1.0, 20th March, 2013
  */
 @SuppressWarnings("rawtypes")
-public class TaskHandlerExecutorRepository extends AbstractExecutorRepository<TaskRequestWrapper,TaskResult, TaskHandler> {
+public class TaskHandlerExecutorRepository extends AbstractExecutorRepository<TaskRequestWrapper, TaskResult, TaskHandler> {
 
-    /** Logger for this class*/
+    /**
+     * Logger for this class
+     */
     private static final Logger LOGGER = LoggerFactory.getLogger(TaskHandlerExecutorRepository.class);
 
-    /** Regex for finding all non alphanumeric characters */
+    /**
+     * Regex for finding all non alphanumeric characters
+     */
     public static final String ONLY_ALPHANUMERIC_REGEX = "[^\\dA-Za-z_]";
 
-    /** Regex for finding all whitespace characters */
+    /**
+     * Regex for finding all whitespace characters
+     */
     public static final String WHITESPACE_REGEX = "\\s+";
 
-    /** The default thread pool core size*/
+    /**
+     * The default thread pool core size
+     */
     private static final int DEFAULT_THREAD_POOL_SIZE = 10;
 
-    /** The publisher used to broadcast events to Service Proxy Subscribers */
+    /**
+     * The publisher used to broadcast events to Service Proxy Subscribers
+     */
     private ServiceProxyEventProducer eventProducer;
-    
+
     /**
      * Gets the TaskHandlerExecutor or RequestCacheableTaskHandlerExecutor for a commandName
+     *
      * @param commandName the command name/String for which the Executor is needed
-     * @param proxyName the threadPool using which command has to be processed
+     * @param proxyName   the threadPool using which command has to be processed
      * @return The executor corresponding to the commandName.
      * @throws UnsupportedOperationException if doesn't find a TaskHandler in the registry corresponding to the command name
      */
-    public Executor<TaskRequestWrapper,TaskResult> getExecutor(String commandName,String proxyName, TaskRequestWrapper requestWrapper) {
-    	Executor<TaskRequestWrapper,TaskResult> executor = null;
+    public Executor<TaskRequestWrapper, TaskResult> getExecutor(String commandName, String proxyName, TaskRequestWrapper requestWrapper) {
+        Executor<TaskRequestWrapper, TaskResult> executor = null;
         //Regex matching of threadPoolName and commandName
         //(Hystrix dashboard requires names to be alphanumeric)    	
-    	String refinedCommandName = this.getRefinedName(commandName);
-    	String refinedProxyName = this.getRefinedName(proxyName);
-    	TaskHandler taskHandler = this.getTaskHandler(commandName, refinedCommandName, proxyName, refinedProxyName, requestWrapper);
-    	int maxConcurrency = this.getMaxConcurrency(taskHandler, proxyName);
-    	int minConcurrency = this.getMinConcurrency(taskHandler, proxyName);
-    	int executionTimeout = this.getExecutionTimeout(taskHandler, commandName);
-        if(taskHandler instanceof HystrixTaskHandler) {
-	        if(((HystrixTaskHandler)taskHandler).getIsolationStrategy()==ExecutionIsolationStrategy.SEMAPHORE) {
-	        	executor = getTaskHandlerExecutorWithSemaphoreIsolation(requestWrapper, refinedCommandName, 
-	        			taskHandler, maxConcurrency);
-	        } else {
-	        	executor = getTaskHandlerExecutor(requestWrapper, refinedCommandName,
-	                refinedProxyName, minConcurrency, maxConcurrency,executionTimeout, taskHandler);
-	        }
-        } else { 
-        	executor = getTaskHandlerExecutor(requestWrapper, refinedCommandName, refinedProxyName,
+        String refinedCommandName = this.getRefinedName(commandName);
+        String refinedProxyName = this.getRefinedName(proxyName);
+        TaskHandler taskHandler = this.getTaskHandler(commandName, refinedCommandName, proxyName, refinedProxyName, requestWrapper);
+        int maxConcurrency = this.getMaxConcurrency(taskHandler, proxyName);
+        int minConcurrency = this.getMinConcurrency(taskHandler, proxyName);
+        int executionTimeout = this.getExecutionTimeout(taskHandler, commandName);
+        if (taskHandler instanceof AsyncHystrixTaskHandler) {
+            executor = getAsyncTaskHandlerExecutor((AsyncHystrixTaskHandler) taskHandler, requestWrapper, refinedCommandName, maxConcurrency);
+        } else if (taskHandler instanceof HystrixTaskHandler) {
+            if (((HystrixTaskHandler) taskHandler).getIsolationStrategy() == ExecutionIsolationStrategy.SEMAPHORE) {
+                executor = getTaskHandlerExecutorWithSemaphoreIsolation(requestWrapper, refinedCommandName,
+                        taskHandler, maxConcurrency);
+            } else {
+                executor = getTaskHandlerExecutor(requestWrapper, refinedCommandName,
+                        refinedProxyName, minConcurrency, maxConcurrency, executionTimeout, taskHandler);
+            }
+        } else {
+            executor = getTaskHandlerExecutor(requestWrapper, refinedCommandName, refinedProxyName,
                     minConcurrency, maxConcurrency, executionTimeout, taskHandler);
         }
         return this.wrapExecutorWithInterceptors(executor, taskHandler);
@@ -95,33 +104,36 @@ public class TaskHandlerExecutorRepository extends AbstractExecutorRepository<Ta
 
     /**
      * Gets the TaskHandlerExecutor or RequestCacheableTaskHandlerExecutor for a commandName
-     * @param commandName the command name/String for which the Executor is needed
-     * @param proxyName the threadPool using which command has to be processed
+     *
+     * @param commandName    the command name/String for which the Executor is needed
+     * @param proxyName      the threadPool using which command has to be processed
      * @param requestWrapper requestWrapper
-     * @param decoder decoder passed by the client
+     * @param decoder        decoder passed by the client
      * @return The executor corresponding to the commandName.
      * @throws UnsupportedOperationException if doesn't find a TaskHandler in the registry corresponding to the command name
      */
-    public Executor<TaskRequestWrapper,TaskResult> getExecutor(String commandName,String proxyName, TaskRequestWrapper requestWrapper, Decoder decoder) {
-    	Executor<TaskRequestWrapper,TaskResult> executor = null;
+    public Executor<TaskRequestWrapper, TaskResult> getExecutor(String commandName, String proxyName, TaskRequestWrapper requestWrapper, Decoder decoder) {
+        Executor<TaskRequestWrapper, TaskResult> executor = null;
         //Regex matching of threadPoolName and commandName
         //(Hystrix dashboard requires names to be alphanumeric)    	
-    	String refinedCommandName = this.getRefinedName(commandName);
-    	String refinedProxyName = this.getRefinedName(proxyName);
-    	TaskHandler taskHandler = this.getTaskHandler(commandName, refinedCommandName, proxyName, refinedProxyName, requestWrapper);
-    	int maxConcurrency = this.getMaxConcurrency(taskHandler, proxyName);
+        String refinedCommandName = this.getRefinedName(commandName);
+        String refinedProxyName = this.getRefinedName(proxyName);
+        TaskHandler taskHandler = this.getTaskHandler(commandName, refinedCommandName, proxyName, refinedProxyName, requestWrapper);
+        int maxConcurrency = this.getMaxConcurrency(taskHandler, proxyName);
         int minConcurrency = this.getMinConcurrency(taskHandler, proxyName);
-    	int executionTimeout = this.getExecutionTimeout(taskHandler, commandName);
-        if(taskHandler instanceof HystrixTaskHandler) {
-	        if(((HystrixTaskHandler)taskHandler).getIsolationStrategy()==ExecutionIsolationStrategy.SEMAPHORE) {
-	        	executor = getTaskHandlerExecutorWithSemaphoreIsolationAndDecoder(requestWrapper, refinedCommandName, 
-	        			taskHandler, maxConcurrency, decoder);
-	        } else {
-	        	executor = getTaskHandlerExecutorWithDecoder(requestWrapper, refinedCommandName,
-	                refinedProxyName, minConcurrency, maxConcurrency,executionTimeout, taskHandler, decoder);
-	        }
-        } else { 
-        	executor = getTaskHandlerExecutorWithDecoder(requestWrapper, refinedCommandName, refinedProxyName,
+        int executionTimeout = this.getExecutionTimeout(taskHandler, commandName);
+        if (taskHandler instanceof AsyncHystrixTaskHandler) {
+            executor = getAsyncTaskHandlerExecutor((AsyncHystrixTaskHandler) taskHandler, requestWrapper, refinedCommandName, maxConcurrency, decoder);
+        } else if (taskHandler instanceof HystrixTaskHandler) {
+            if (((HystrixTaskHandler) taskHandler).getIsolationStrategy() == ExecutionIsolationStrategy.SEMAPHORE) {
+                executor = getTaskHandlerExecutorWithSemaphoreIsolationAndDecoder(requestWrapper, refinedCommandName,
+                        taskHandler, maxConcurrency, decoder);
+            } else {
+                executor = getTaskHandlerExecutorWithDecoder(requestWrapper, refinedCommandName,
+                        refinedProxyName, minConcurrency, maxConcurrency, executionTimeout, taskHandler, decoder);
+            }
+        } else {
+            executor = getTaskHandlerExecutorWithDecoder(requestWrapper, refinedCommandName, refinedProxyName,
                     minConcurrency, maxConcurrency, executionTimeout, taskHandler, decoder);
         }
         return this.wrapExecutorWithInterceptors(executor, taskHandler);
@@ -129,18 +141,28 @@ public class TaskHandlerExecutorRepository extends AbstractExecutorRepository<Ta
 
     /**
      * Gets the TaskHandlerExecutor for a commandName
-     * @param commandName the command name/String for which the Executor is needed. Defaults threadPoolName to commandName
+     *
+     * @param commandName    the command name/String for which the Executor is needed. Defaults threadPoolName to commandName
      * @param requestWrapper requestWrapper having data,hashmap of parameters
      * @return The executor corresponding to the commandName.
      * @throws UnsupportedOperationException if doesn't find a TaskHandler in the registry corresponding to the command name
      */
-    public Executor<TaskRequestWrapper,TaskResult> getExecutor(String commandName, TaskRequestWrapper requestWrapper) {
+    public Executor<TaskRequestWrapper, TaskResult> getExecutor(String commandName, TaskRequestWrapper requestWrapper) {
         return this.getExecutor(commandName, commandName, requestWrapper);
     }
 
     private Future<TaskResult> executeAsyncCommand(final long receiveTime, final TaskHandlerExecutor command,
                                                    final String commandName, final TaskRequestWrapper requestWrapper) {
-        if(command==null) {
+        if (command == null) {
+            throw new UnsupportedOperationException("Invoked unsupported command : " + commandName);
+        } else {
+            return command.queue();
+        }
+    }
+
+    private CompletableFuture<TaskResult> executeAsyncCommandV2(final long receiveTime, final AsyncTaskHandlerExecutor command,
+                                                                final String commandName, final TaskRequestWrapper requestWrapper) {
+        if (command == null) {
             throw new UnsupportedOperationException("Invoked unsupported command : " + commandName);
         } else {
             return command.queue();
@@ -149,9 +171,10 @@ public class TaskHandlerExecutorRepository extends AbstractExecutorRepository<Ta
 
     /**
      * Executes a command asynchronously. (Returns a future promise)
-     * @param commandName name of the command
+     *
+     * @param commandName    name of the command
      * @param requestWrapper requestWrapper having data,hashmap of parameters
-     * @param proxyName name of the threadpool in which the command has to be executed
+     * @param proxyName      name of the threadpool in which the command has to be executed
      * @return thrift result
      * @throws UnsupportedOperationException if no handler found for command
      */
@@ -161,24 +184,35 @@ public class TaskHandlerExecutorRepository extends AbstractExecutorRepository<Ta
         return executeAsyncCommand(receiveTime, command, commandName, requestWrapper);
     }
 
+    public CompletableFuture<TaskResult> executeAsyncCommandV2(final String commandName, String proxyName, final TaskRequestWrapper requestWrapper) throws UnsupportedOperationException {
+        final long receiveTime = System.currentTimeMillis();
+        final Executor<TaskRequestWrapper, TaskResult> executor = getExecutor(commandName, proxyName, requestWrapper);
+        if (executor instanceof AsyncTaskHandlerExecutor) {
+            return executeAsyncCommandV2(receiveTime, (AsyncTaskHandlerExecutor) executor, commandName, requestWrapper);
+        } else {
+            throw new IllegalArgumentException("executeAsyncCommandV2 should be called only for command which implement AsyncHystrixTaskHandler");
+        }
+    }
+
     /**
      * Executes a command
-     * @param commandName name of the command
+     *
+     * @param commandName    name of the command
      * @param requestWrapper requestWrapper having data,hashmap of parameters
-     * @param proxyName name of the threadpool in which the command has to be executed
+     * @param proxyName      name of the threadpool in which the command has to be executed
      * @return thrift result
      * @throws UnsupportedOperationException if no handler found for command
      */
     public <S> TaskResult executeCommand(String commandName, String proxyName, TaskRequestWrapper requestWrapper) throws UnsupportedOperationException {
         long receiveTime = System.currentTimeMillis();
         TaskHandlerExecutor<S> command = (TaskHandlerExecutor) getExecutor(commandName, proxyName, requestWrapper);
-        if(command==null) {
+        if (command == null) {
             throw new UnsupportedOperationException("Invoked unsupported command : " + commandName);
         } else {
             try {
                 return command.execute();
             } catch (Exception e) {
-                throw new RuntimeException("Error in processing command "+commandName+": " + e.getMessage(), e);
+                throw new RuntimeException("Error in processing command " + commandName + ": " + e.getMessage(), e);
             } finally {
                 publishEvent(command, receiveTime, requestWrapper);
             }
@@ -187,33 +221,35 @@ public class TaskHandlerExecutorRepository extends AbstractExecutorRepository<Ta
 
     /**
      * Executes a command
-     * @param commandName name of the command (also the thread pool name)
+     *
+     * @param commandName    name of the command (also the thread pool name)
      * @param requestWrapper requestWrapper having data,hashmap of parameters
      * @return thrift result
      * @throws UnsupportedOperationException if no handler found for command
      */
     public TaskResult executeCommand(String commandName, TaskRequestWrapper requestWrapper) throws UnsupportedOperationException {
-        return this.executeCommand(commandName,commandName, requestWrapper);
+        return this.executeCommand(commandName, commandName, requestWrapper);
     }
 
     /**
      * Executes a command
-     * @param commandName name of the command (also the thread pool name)
+     *
+     * @param commandName    name of the command (also the thread pool name)
      * @param requestWrapper requestWrapper having data,hashmap of parameters
      * @return thrift result
      * @throws UnsupportedOperationException if no handler found for command
      */
     @SuppressWarnings("unchecked")
-    public <T, S> TaskResult<T> executeCommand(String commandName, TaskRequestWrapper requestWrapper,Decoder<T> decoder) throws UnsupportedOperationException {
+    public <T, S> TaskResult<T> executeCommand(String commandName, TaskRequestWrapper requestWrapper, Decoder<T> decoder) throws UnsupportedOperationException {
         long receiveTime = System.currentTimeMillis();
         TaskHandlerExecutor<S> command = (TaskHandlerExecutor) getExecutor(commandName, commandName, requestWrapper, decoder);
-        if(command==null) {
+        if (command == null) {
             throw new UnsupportedOperationException("Invoked unsupported command : " + commandName);
         } else {
             try {
                 return command.execute();
             } catch (Exception e) {
-                throw new RuntimeException("Error in processing command "+commandName+": " + e.getMessage(), e);
+                throw new RuntimeException("Error in processing command " + commandName + ": " + e.getMessage(), e);
             } finally {
                 publishEvent(command, receiveTime, requestWrapper);
             }
@@ -222,7 +258,8 @@ public class TaskHandlerExecutorRepository extends AbstractExecutorRepository<Ta
 
     /**
      * Executes a command asynchronously. (Returns a future promise)
-     * @param commandName name of the command
+     *
+     * @param commandName    name of the command
      * @param requestWrapper requestWrapper having data,hashmap of parameters
      * @return thrift result
      * @throws UnsupportedOperationException if no handler found for command
@@ -235,93 +272,127 @@ public class TaskHandlerExecutorRepository extends AbstractExecutorRepository<Ta
 
     /**
      * Executes a command asynchronously
-     * @param commandName name of the command (also the thread pool name)
+     *
+     * @param commandName    name of the command (also the thread pool name)
      * @param requestWrapper requestWrapper having data,hashmap of parameters
      * @return thrift result
      * @throws UnsupportedOperationException if no handler found for command
      */
     public Future<TaskResult> executeAsyncCommand(String commandName, TaskRequestWrapper requestWrapper) throws UnsupportedOperationException {
-        return this.executeAsyncCommand(commandName,commandName, requestWrapper);
+        return this.executeAsyncCommand(commandName, commandName, requestWrapper);
+    }
+
+    public CompletableFuture<TaskResult> executeAsyncCommandV2(String commandName, TaskRequestWrapper requestWrapper, Decoder decoder) throws UnsupportedOperationException {
+        final long receiveTime = System.currentTimeMillis();
+        Executor<TaskRequestWrapper, TaskResult> executor = getExecutor(commandName, commandName, requestWrapper, decoder);
+        if (executor instanceof AsyncTaskHandlerExecutor) {
+            return executeAsyncCommandV2(receiveTime, (AsyncTaskHandlerExecutor) executor, commandName, requestWrapper);
+        } else {
+            throw new IllegalArgumentException("executeAsyncCommandV2 should be called only for command which implement AsyncHystrixTaskHandler");
+        }
+    }
+
+    public CompletableFuture<TaskResult> executeAsyncCommandV2(String commandName, TaskRequestWrapper requestWrapper) throws UnsupportedOperationException {
+        return this.executeAsyncCommandV2(commandName, commandName, requestWrapper);
     }
 
     /**
      * Helper methods to create and return the appropriate TaskHandlerExecutor instance
      */
-    private Executor<TaskRequestWrapper,TaskResult> getTaskHandlerExecutorWithSemaphoreIsolation(TaskRequestWrapper requestWrapper, String refinedCommandName,
-                                                                              TaskHandler taskHandler, int maxConcurrentSize) {
-        if (taskHandler instanceof RequestCacheableHystrixTaskHandler){
-            return new RequestCacheableTaskHandlerExecutor((RequestCacheableHystrixTaskHandler)taskHandler,this.getTaskContext(),refinedCommandName,
-                    requestWrapper , maxConcurrentSize);
+    private Executor<TaskRequestWrapper, TaskResult> getTaskHandlerExecutorWithSemaphoreIsolation(TaskRequestWrapper requestWrapper, String refinedCommandName,
+                                                                                                  TaskHandler taskHandler, int maxConcurrentSize) {
+        if (taskHandler instanceof RequestCacheableHystrixTaskHandler) {
+            return new RequestCacheableTaskHandlerExecutor((RequestCacheableHystrixTaskHandler) taskHandler, this.getTaskContext(), refinedCommandName,
+                    requestWrapper, maxConcurrentSize);
         } else {
-            return new TaskHandlerExecutor(taskHandler,this.getTaskContext(),refinedCommandName,requestWrapper , maxConcurrentSize);
+            return new TaskHandlerExecutor(taskHandler, this.getTaskContext(), refinedCommandName, requestWrapper, maxConcurrentSize);
         }
     }
-    private Executor<TaskRequestWrapper,TaskResult> getTaskHandlerExecutor(TaskRequestWrapper requestWrapper, String refinedCommandName,
-                                                        String refinedProxyName, int minConcurrencySize, int maxConcurrentSize, int executorTimeOut, TaskHandler taskHandler) {
+
+    private Executor<TaskRequestWrapper, TaskResult> getTaskHandlerExecutor(TaskRequestWrapper requestWrapper, String refinedCommandName,
+                                                                            String refinedProxyName, int minConcurrencySize, int maxConcurrentSize, int executorTimeOut, TaskHandler taskHandler) {
         if (taskHandler instanceof RequestCacheableHystrixTaskHandler) {
-            return new RequestCacheableTaskHandlerExecutor((RequestCacheableHystrixTaskHandler)taskHandler,this.getTaskContext(),
-                    refinedCommandName, executorTimeOut, refinedProxyName, minConcurrencySize, maxConcurrentSize,requestWrapper);
+            return new RequestCacheableTaskHandlerExecutor((RequestCacheableHystrixTaskHandler) taskHandler, this.getTaskContext(),
+                    refinedCommandName, executorTimeOut, refinedProxyName, minConcurrencySize, maxConcurrentSize, requestWrapper);
         } else {
-            return new TaskHandlerExecutor(taskHandler,this.getTaskContext(),refinedCommandName, executorTimeOut,
-                    refinedProxyName, minConcurrencySize, maxConcurrentSize,requestWrapper);
+            return new TaskHandlerExecutor(taskHandler, this.getTaskContext(), refinedCommandName, executorTimeOut,
+                    refinedProxyName, minConcurrencySize, maxConcurrentSize, requestWrapper);
         }
+    }
+
+    private AsyncTaskHandlerExecutor getAsyncTaskHandlerExecutor(AsyncHystrixTaskHandler taskHandler,
+                                                                 TaskRequestWrapper requestWrapper,
+                                                                 String refinedCommandName,
+                                                                 int maxConcurrentSize,
+                                                                 Decoder decoder) {
+        //noinspection unchecked
+        return new AsyncTaskHandlerExecutor<>(taskHandler, this.getTaskContext(), refinedCommandName, requestWrapper, maxConcurrentSize, decoder);
+    }
+
+    private AsyncTaskHandlerExecutor getAsyncTaskHandlerExecutor(AsyncHystrixTaskHandler taskHandler,
+                                                                 TaskRequestWrapper requestWrapper,
+                                                                 String refinedCommandName,
+                                                                 int maxConcurrentSize) {
+        //noinspection unchecked
+        return new AsyncTaskHandlerExecutor<>(taskHandler, this.getTaskContext(), refinedCommandName, requestWrapper, maxConcurrentSize);
     }
 
     /**
      * Helper methods to create and return the appropriate TaskHandlerExecutor instance
      */
-    private  Executor<TaskRequestWrapper,TaskResult> getTaskHandlerExecutorWithSemaphoreIsolationAndDecoder(TaskRequestWrapper requestWrapper, String refinedCommandName,
-                                                                                         TaskHandler taskHandler, int maxConcurrentSize, Decoder decoder) {
-        if (taskHandler instanceof RequestCacheableHystrixTaskHandler){
-            return  new RequestCacheableTaskHandlerExecutor((RequestCacheableHystrixTaskHandler)taskHandler,this.getTaskContext(),refinedCommandName,
-                    requestWrapper , maxConcurrentSize,decoder);
-        } else {
-            return new TaskHandlerExecutor(taskHandler,this.getTaskContext(),refinedCommandName,requestWrapper , maxConcurrentSize, decoder);
-        }
-    }
-    private Executor<TaskRequestWrapper,TaskResult> getTaskHandlerExecutorWithDecoder(TaskRequestWrapper requestWrapper, String refinedCommandName,
-                                                                   String refinedProxyName, int minConcurrencySize, int maxConcurrentSize, int executorTimeOut,
-                                                                   TaskHandler taskHandler, Decoder decoder) {
+    private Executor<TaskRequestWrapper, TaskResult> getTaskHandlerExecutorWithSemaphoreIsolationAndDecoder(TaskRequestWrapper requestWrapper, String refinedCommandName,
+                                                                                                            TaskHandler taskHandler, int maxConcurrentSize, Decoder decoder) {
         if (taskHandler instanceof RequestCacheableHystrixTaskHandler) {
-            return new RequestCacheableTaskHandlerExecutor((RequestCacheableHystrixTaskHandler)taskHandler,this.getTaskContext(),
-                    refinedCommandName, executorTimeOut, refinedProxyName, minConcurrencySize, maxConcurrentSize,requestWrapper, decoder);
+            return new RequestCacheableTaskHandlerExecutor((RequestCacheableHystrixTaskHandler) taskHandler, this.getTaskContext(), refinedCommandName,
+                    requestWrapper, maxConcurrentSize, decoder);
         } else {
-            return new TaskHandlerExecutor(taskHandler,this.getTaskContext(),refinedCommandName, executorTimeOut,
-                    refinedProxyName, minConcurrencySize, maxConcurrentSize,requestWrapper, decoder);
+            return new TaskHandlerExecutor(taskHandler, this.getTaskContext(), refinedCommandName, requestWrapper, maxConcurrentSize, decoder);
         }
     }
-    
+
+    private Executor<TaskRequestWrapper, TaskResult> getTaskHandlerExecutorWithDecoder(TaskRequestWrapper requestWrapper, String refinedCommandName,
+                                                                                       String refinedProxyName, int minConcurrencySize, int maxConcurrentSize, int executorTimeOut,
+                                                                                       TaskHandler taskHandler, Decoder decoder) {
+        if (taskHandler instanceof RequestCacheableHystrixTaskHandler) {
+            return new RequestCacheableTaskHandlerExecutor((RequestCacheableHystrixTaskHandler) taskHandler, this.getTaskContext(),
+                    refinedCommandName, executorTimeOut, refinedProxyName, minConcurrencySize, maxConcurrentSize, requestWrapper, decoder);
+        } else {
+            return new TaskHandlerExecutor(taskHandler, this.getTaskContext(), refinedCommandName, executorTimeOut,
+                    refinedProxyName, minConcurrencySize, maxConcurrentSize, requestWrapper, decoder);
+        }
+    }
+
     /**
-     * Helper method to wrap the Executor with request and response interceptors 
+     * Helper method to wrap the Executor with request and response interceptors
      */
-    private Executor<TaskRequestWrapper,TaskResult> wrapExecutorWithInterceptors(Executor<TaskRequestWrapper,TaskResult> executor, TaskHandler taskHandler) {
+    private Executor<TaskRequestWrapper, TaskResult> wrapExecutorWithInterceptors(Executor<TaskRequestWrapper, TaskResult> executor, TaskHandler taskHandler) {
         ClientRequestInterceptor<TaskRequestWrapper> tracingRequestInterceptor = new ClientRequestInterceptor<TaskRequestWrapper>();
         CommandClientResponseInterceptor<TaskResult> tracingResponseInterceptor = new CommandClientResponseInterceptor<TaskResult>();
         return this.wrapExecutorWithInterceptors(executor, taskHandler, tracingRequestInterceptor, tracingResponseInterceptor);
     }
-    
+
     /**
      * Helper method to get the execution timeout
      */
     private int getExecutionTimeout(TaskHandler taskHandler, String commandName) {
-    	int executionTimeout = HystrixTaskHandler.DEFAULT_EXECUTOR_TIMEOUT;
-    	if (taskHandler instanceof HystrixTaskHandler) {
-    		executionTimeout = ((HystrixTaskHandler)taskHandler).getExecutorTimeout(commandName);
-    	}
-    	return executionTimeout;
+        int executionTimeout = HystrixTaskHandler.DEFAULT_EXECUTOR_TIMEOUT;
+        if (taskHandler instanceof HystrixTaskHandler) {
+            executionTimeout = ((HystrixTaskHandler) taskHandler).getExecutorTimeout(commandName);
+        }
+        return executionTimeout;
     }
-    
+
     /**
      * Helper method to get the max concurrency size for the specified handler
      */
     private int getMaxConcurrency(TaskHandler taskHandler, String proxyName) {
         int maxConcurrentSize = DEFAULT_THREAD_POOL_SIZE;
-        if(taskHandler instanceof HystrixTaskHandler) {
+        if (taskHandler instanceof HystrixTaskHandler) {
             HystrixTaskHandler hystrixTaskHandler = (HystrixTaskHandler) taskHandler;
-            LOGGER.debug("Isolation strategy: "+hystrixTaskHandler.getIsolationStrategy()+" for "+hystrixTaskHandler);
-            if(((TaskHandlerRegistry)getRegistry()).getMaxPoolSize(proxyName)!=null) {
-                LOGGER.debug("Found a predefined max pool size for "+proxyName+". Not using default value of "+DEFAULT_THREAD_POOL_SIZE);
-                maxConcurrentSize = ((TaskHandlerRegistry)getRegistry()).getMaxPoolSize(proxyName);
+            LOGGER.debug("Isolation strategy: " + hystrixTaskHandler.getIsolationStrategy() + " for " + hystrixTaskHandler);
+            if (((TaskHandlerRegistry) getRegistry()).getMaxPoolSize(proxyName) != null) {
+                LOGGER.debug("Found a predefined max pool size for " + proxyName + ". Not using default value of " + DEFAULT_THREAD_POOL_SIZE);
+                maxConcurrentSize = ((TaskHandlerRegistry) getRegistry()).getMaxPoolSize(proxyName);
             }
         }
         return maxConcurrentSize;
@@ -339,44 +410,45 @@ public class TaskHandlerExecutorRepository extends AbstractExecutorRepository<Ta
         }
         return minConcurrentSize;
     }
-    
+
     /**
      * Helper method to refine the specified name
      */
     private String getRefinedName(String name) {
-    	return name.replaceAll(ONLY_ALPHANUMERIC_REGEX, "").replaceAll(WHITESPACE_REGEX, "");
+        return name.replaceAll(ONLY_ALPHANUMERIC_REGEX, "").replaceAll(WHITESPACE_REGEX, "");
     }
-    
+
     /**
-     * Helper method to validate the handler identifications parameters and return a suitable active TaskHandler 
+     * Helper method to validate the handler identifications parameters and return a suitable active TaskHandler
      */
     private TaskHandler getTaskHandler(String commandName, String refinedCommandName, String proxyName, String refinedProxyName, RequestWrapper requestWrapper) {
-        if(!commandName.equals(refinedCommandName)) {
-            LOGGER.debug("Command names are not allowed to have Special characters/ whitespaces. Replacing: "+commandName+" with "+refinedCommandName);
+        if (!commandName.equals(refinedCommandName)) {
+            LOGGER.debug("Command names are not allowed to have Special characters/ whitespaces. Replacing: " + commandName + " with " + refinedCommandName);
         }
-        if(!proxyName.equals(refinedProxyName)) {
-            LOGGER.debug("Thread pool names are not allowed to have Special characters/ whitespaces. Replacing: "+proxyName+" with "+refinedProxyName);
+        if (!proxyName.equals(refinedProxyName)) {
+            LOGGER.debug("Thread pool names are not allowed to have Special characters/ whitespaces. Replacing: " + proxyName + " with " + refinedProxyName);
         }
-        if(proxyName.isEmpty()) {
-            proxyName=commandName;
-            LOGGER.debug("null/empty threadPoolName passed. defaulting to commandName: "+commandName);
+        if (proxyName.isEmpty()) {
+            proxyName = commandName;
+            LOGGER.debug("null/empty threadPoolName passed. defaulting to commandName: " + commandName);
         }
-        TaskHandler taskHandler = ((TaskHandlerRegistry)getRegistry()).getTaskHandlerByCommand(commandName);
-        if(taskHandler!=null) {
+        TaskHandler taskHandler = ((TaskHandlerRegistry) getRegistry()).getTaskHandlerByCommand(commandName);
+        if (taskHandler != null) {
             if (!taskHandler.isActive()) {
-                LOGGER.error("TaskHandler: "+taskHandler.getName()+" is not yet active. Command: "+commandName+" will not be processed");
+                LOGGER.error("TaskHandler: " + taskHandler.getName() + " is not yet active. Command: " + commandName + " will not be processed");
                 return null;
             }
         } else {
-        	throw new UnsupportedOperationException("Invoked unsupported command : " + commandName);        	
+            throw new UnsupportedOperationException("Invoked unsupported command : " + commandName);
         }
         return taskHandler;
     }
 
     /**
      * Builds & Publishes Event based using eventProducer
-     * @param command Command under execution
-     * @param receiveTime Time this command has been recieved for execution
+     *
+     * @param command        Command under execution
+     * @param receiveTime    Time this command has been recieved for execution
      * @param requestWrapper Request Wrapper to extract request params.
      */
     private void publishEvent(final TaskHandlerExecutor command, final long receiveTime, final TaskRequestWrapper requestWrapper) {
@@ -385,7 +457,7 @@ public class TaskHandlerExecutorRepository extends AbstractExecutorRepository<Ta
             final Map<String, String> params = requestWrapper.getParams();
             ServiceProxyEvent.Builder eventBuilder = command.getEventBuilder().withCommandData(command).withEventSource(command.getClass().getName());
             eventBuilder.withRequestId(params.get("requestID")).withRequestReceiveTime(receiveTime);
-            if(params.containsKey("requestSentTime")) {
+            if (params.containsKey("requestSentTime")) {
                 eventBuilder.withRequestSentTime(Long.valueOf(params.get("requestSentTime")));
             }
             eventProducer.publishEvent(eventBuilder.build());
@@ -393,10 +465,12 @@ public class TaskHandlerExecutorRepository extends AbstractExecutorRepository<Ta
             LOGGER.debug("eventProducer not set, not publishing event");
         }
     }
-    
-    /** Getter/Setter methods*/
+
+    /**
+     * Getter/Setter methods
+     */
     public void setEventProducer(ServiceProxyEventProducer eventProducer) {
         this.eventProducer = eventProducer;
     }
-    
+
 }
